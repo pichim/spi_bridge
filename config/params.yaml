@@ -1,0 +1,26 @@
+spi_bridge:
+  ros__parameters:
+    # SPI device selection
+    spi_bus: 0
+    spi_dev: 0
+    spi_max_speed_hz: 33333333
+
+    # Timing
+    main_task_period_us: 10000 # 10 ms cycle (100 Hz)
+    arm_gap_us: 100
+    cmd_timeout_ms: 200 # deadman timeout: zero outputs if no cmd
+
+    # Command clamps
+    max_forward: 2.0 # m/s
+    max_turn: 3.0 # rad/s
+
+    # Frames
+    imu_frame_id: "imu_link"
+    base_frame_id: "base_link"
+
+    # (3) Optional scaling to match ROS units:
+    #     Keep at 1.0 to publish raw values.
+    #     Example: if Nucleo sends gyro in deg/s, use gyro_scale: 0.01745329252
+    gyro_scale: 1.0
+    accel_scale: 1.0
+    mag_scale: 1.0
