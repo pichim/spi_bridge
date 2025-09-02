@@ -120,6 +120,22 @@ gyro_scale: 0.01745329252  # to publish rad/s
 
 ---
 
+## Additional commands
+
+### Adding a launch argument to change `spi_max_speed_hz` at runtime:
+
+```bash
+ros2 topic pub -r 50 /cmd_vel geometry_msgs/Twist "{linear: {x: 0.3}, angular: {z: 0.0}}"
+```
+
+### Then, in another terminal, set `spi_max_speed_hz` to 12 MHz (default is 8 MHz):
+
+```bash
+ros2 param set /spi_bridge spi_max_speed_hz 12000000
+```
+
+---
+
 ## Notes
 
 - Protocol matches the original script:  

@@ -24,3 +24,6 @@ spi_bridge:
     gyro_scale: 1.0
     accel_scale: 1.0
     mag_scale: 1.0
+
+    verbose_cycle_log: true # toggles per-cycle log
+    imu_qos_reliability: "BEST_EFFORT" # or "RELIABLE"

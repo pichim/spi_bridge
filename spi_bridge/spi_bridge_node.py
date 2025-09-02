@@ -3,15 +3,13 @@
 # Raspberry Pi 5 (Ubuntu)  ⇄  Nucleo F446RE (Mbed CE)
 # ROS 2 Jazzy rclpy node that wraps your original SPI loop with minimal changes.
 #
-# This file keeps your original constants, CRC table, verify function, buffer
-# handling, and the double-transfer timing model. I only wrapped it with ROS 2
-# pubs/subs and added small dev-friendly bits (params, logging throttle, guards).
+# Keeps your original constants, CRC table, verify function, buffers,
+# and the double-transfer timing model. Adds ROS2 pubs/subs, params,
+# logging control, and safer error handling.
 
 import os
-import math
 import struct
 import time
-from typing import List
 
 import rclpy
 from rclpy.node import Node
@@ -27,8 +25,9 @@ except Exception:
     spidev = None
 
 # ---------------------------------------------------------------------------
-# 2) DEV “DEFINE” (toggle-able): keep per-cycle log enabled for now.
-#    If you comment this out or set to False later, logs will be throttled.
+# DEV “DEFINE” (toggle-able): per-cycle log enabled by default for now.
+# You can set this to False later to reduce log spam.
+# A runtime param `verbose_cycle_log` also controls this at runtime.
 # ---------------------------------------------------------------------------
 VERBOSE_CYCLE_LOG = True  # you can set to False later to reduce log spam
 
@@ -78,7 +77,7 @@ def calculate_crc8(buffer):
 def verify_checksum_seq(seq):
     """
     Verify CRC over all bytes except last, compared to last byte.
-    Works with list/bytes/bytearray (kept identical to your original helper).
+    Works with list/bytes/bytearray (same as original).
     """
     crc = 0x00
     last = len(seq) - 1
@@ -97,11 +96,9 @@ class SpiData:
         self.last_delta_time_us = 0
 
 
-# Keep your hook; we now pass the desired fwd/turn into it.
+# Your original hook: we drive [0],[1] from /cmd_vel.
 def load_tx_frame(tx_list, frame_idx, fwd, turn, t0):
     """Update tx_list in-place for this frame (indices [0],[1] from /cmd_vel)."""
-    # You can add time-based demos here later if you like:
-    # t = time.perf_counter() - t0
     tx_list[0] = fwd
     tx_list[1] = turn
 
@@ -130,11 +127,12 @@ class SpiBridgeNode(Node):
         # Frames
         self.declare_parameter("imu_frame_id", "imu_link")
         self.declare_parameter("base_frame_id", "base_link")
-        # 3) Unit scaling (optional; defaults keep your values as-is)
-        #    Use these if your Nucleo sends deg/s or mG etc and you want to convert.
-        self.declare_parameter("gyro_scale", 1.0)  # multiply raw -> rad/s
-        self.declare_parameter("accel_scale", 1.0)  # multiply raw -> m/s^2
-        self.declare_parameter("mag_scale", 1.0)  # multiply raw -> Tesla
+        # Optional unit scaling
+        self.declare_parameter("gyro_scale", 1.0)  # raw -> rad/s
+        self.declare_parameter("accel_scale", 1.0)  # raw -> m/s^2
+        self.declare_parameter("mag_scale", 1.0)  # raw -> Tesla
+        # Verbose logging param (runtime override for VERBOSE_CYCLE_LOG)
+        self.declare_parameter("verbose_cycle_log", VERBOSE_CYCLE_LOG)
 
         spi_bus = int(self.get_parameter("spi_bus").value)
         spi_dev = int(self.get_parameter("spi_dev").value)
@@ -149,8 +147,9 @@ class SpiBridgeNode(Node):
         self.gyro_scale = float(self.get_parameter("gyro_scale").value)
         self.accel_scale = float(self.get_parameter("accel_scale").value)
         self.mag_scale = float(self.get_parameter("mag_scale").value)
+        self.verbose_cycle_log = bool(self.get_parameter("verbose_cycle_log").value)
 
-        # ---------------- Startup sanity checks (6) ----------------
+        # ---------------- Startup sanity checks ----------------
         dev_path = f"/dev/spidev{spi_bus}.{spi_dev}"
         if not os.path.exists(dev_path):
             raise RuntimeError(f"{dev_path} not found. Enable SPI: add 'dtparam=spi=on' to /boot/firmware/config.txt and reboot.")
@@ -180,6 +179,9 @@ class SpiBridgeNode(Node):
         self.tx2 = bytearray(SPI_MSG_SIZE)
         self.tx2[0] = SPI_HEADER_MASTER
 
+        # Precompile struct format for pack/unpack (clean + tiny perf gain)
+        self._struct_floats = struct.Struct(f"<{SPI_NUM_FLOATS}f")
+
         # Command state (from /cmd_vel)
         self.cmd_forward = 0.0
         self.cmd_turn = 0.0
@@ -196,15 +198,13 @@ class SpiBridgeNode(Node):
         self.pub_mag = self.create_publisher(MagneticField, "/imu/mag", qos_sensors)
         self.pub_diag = self.create_publisher(DiagnosticArray, "/spi/diag", qos_cmd)
 
-        # Timing
+        # Timing & log throttle
         self.start_time = time.perf_counter()
         self.previous_time = self.start_time
-        self.prev_valid_time = self.start_time
+        self._last_log_time = self.start_time
 
-        # Logging throttle helpers
-        self._last_log_time = time.perf_counter()
-
-        # Use a ROS timer to drive your original “while True” loop period
+        # Use a ROS timer to drive your original “while True” loop period.
+        # No manual sleep inside; the timer schedules cadence.
         self.timer = self.create_timer(self.main_task_period_us / 1_000_000.0, self._loop_once)
 
         self.get_logger().info(f"SPI opened on {dev_path} @ {spi_speed} Hz, period {self.main_task_period_us/1000:.3f} ms")
@@ -221,10 +221,22 @@ class SpiBridgeNode(Node):
     # -------------------- Main cycle (your loop body) --------------------
     def _loop_once(self):
         cycle_start_time = time.perf_counter()
+        fail_reason = ""
 
         # 1) ARM-ONLY (0x56 + zeros)
         t_xfer1_start = time.perf_counter()
-        _ = self.spi.xfer2(self.tx1)  # list of ints; not used
+        try:
+            _ = self.spi.xfer2(self.tx1)  # list[int]; unused
+        except Exception as e:
+            # Treat as a failed cycle; publish diag and return.
+            t_xfer1_end = time.perf_counter()
+            xfer1_us = (t_xfer1_end - t_xfer1_start) * 1_000_000.0
+            self.received_data.failed_count += 1
+            fail_reason = f"arm_xfer_error: {type(e).__name__}: {e}"
+            self.get_logger().warn(f"SPI ARM xfer error: {e}")
+            self._publish_diag(xfer1_us, 0.0, True)
+            self._finish_period_and_maybe_log(cycle_start_time, xfer1_us, 0.0)
+            return
         t_xfer1_end = time.perf_counter()
         xfer1_us = (t_xfer1_end - t_xfer1_start) * 1_000_000.0
 
@@ -244,25 +256,42 @@ class SpiBridgeNode(Node):
         # Fill payload (first two floats are your command signals)
         load_tx_frame(self.transmitted_data.data, self.transmitted_data.message_count, fwd, turn, self.start_time)
 
-        # pack all floats in one go; compute CRC
-        struct.pack_into("<%df" % SPI_NUM_FLOATS, self.tx2, 1, *self.transmitted_data.data)
+        # Pack all floats in one go; compute CRC
+        self._struct_floats.pack_into(self.tx2, 1, *self.transmitted_data.data)
         self.tx2[-1] = calculate_crc8(memoryview(self.tx2)[:-1])
 
         t_xfer2_start = time.perf_counter()
-        rx2_list = self.spi.xfer2(self.tx2)  # returns list[int]
+        try:
+            rx2_list = self.spi.xfer2(self.tx2)  # list[int]
+        except Exception as e:
+            t_xfer2_end = time.perf_counter()
+            xfer2_us = (t_xfer2_end - t_xfer2_start) * 1_000_000.0
+            self.received_data.failed_count += 1
+            fail_reason = f"publish_xfer_error: {type(e).__name__}: {e}"
+            self.get_logger().warn(f"SPI PUBLISH xfer error: {e}")
+            self._publish_diag(xfer1_us, xfer2_us, True)
+            self._finish_period_and_maybe_log(cycle_start_time, xfer1_us, xfer2_us)
+            return
         t_xfer2_end = time.perf_counter()
         xfer2_us = (t_xfer2_end - t_xfer2_start) * 1_000_000.0
 
         # Prefer the second reply (fresh data). Do NOT fallback to the first.
         if not (len(rx2_list) == SPI_MSG_SIZE and verify_checksum_seq(rx2_list) and rx2_list[0] == SPI_HEADER_SLAVE):
             self.received_data.failed_count += 1
+            if len(rx2_list) != SPI_MSG_SIZE:
+                fail_reason = f"bad_len:{len(rx2_list)}"
+            elif not verify_checksum_seq(rx2_list):
+                fail_reason = "crc_fail"
+            elif rx2_list[0] != SPI_HEADER_SLAVE:
+                fail_reason = f"bad_hdr:0x{rx2_list[0]:02X}"
+            self.get_logger().warn(f"SPI frame rejected ({fail_reason}).")
             self._publish_diag(xfer1_us, xfer2_us, True)
-            self._finish_period_and_maybe_sleep(cycle_start_time, xfer1_us, xfer2_us, failed=True)
+            self._finish_period_and_maybe_log(cycle_start_time, xfer1_us, xfer2_us)
             return
 
         # Process received data (bulk unpack)
         rx_ba = bytearray(rx2_list)  # convert once for struct.unpack
-        floats_tuple = struct.unpack_from("<%df" % SPI_NUM_FLOATS, rx_ba, 1)
+        floats_tuple = self._struct_floats.unpack_from(rx_ba, 1)
         self.received_data.data[:] = floats_tuple
 
         self.received_data.message_count += 1
@@ -281,19 +310,16 @@ class SpiBridgeNode(Node):
         self._publish_mag()
         self._publish_diag(xfer1_us, xfer2_us, False)
 
-        # maintain your cooperative timing
-        self._finish_period_and_maybe_sleep(cycle_start_time, xfer1_us, xfer2_us, failed=False)
+        # Log per-cycle (or throttled)
+        self._finish_period_and_maybe_log(cycle_start_time, xfer1_us, xfer2_us)
 
     # -------------------- Helpers --------------------
-    def _finish_period_and_maybe_sleep(self, cycle_start_time, xfer1_us, xfer2_us, failed: bool):
+    def _finish_period_and_maybe_log(self, cycle_start_time, xfer1_us, xfer2_us):
         main_task_elapsed_time_us = (time.perf_counter() - cycle_start_time) * 1_000_000.0
-        remaining_us = self.main_task_period_us - main_task_elapsed_time_us
-        if remaining_us > 0:
-            time.sleep(remaining_us / 1_000_000.0)
 
-        # 1) Original-style per-cycle log (can be noisy). Controlled by VERBOSE_CYCLE_LOG.
-        # 2) If VERBOSE_CYCLE_LOG is False, we throttle to ~1 Hz instead.
-        if VERBOSE_CYCLE_LOG:
+        # 1) Original-style per-cycle log (can be noisy). Controlled by verbose_cycle_log param.
+        # 2) If verbose_cycle_log is False, we throttle to ~1 Hz instead.
+        if self.verbose_cycle_log:
             self.get_logger().info(f"Busy: {int(main_task_elapsed_time_us)} us | " f"Xfer1: {int(xfer1_us)} us | Xfer2: {int(xfer2_us)} us | " f"Failed: {self.received_data.failed_count}")
         else:
             now = time.perf_counter()
@@ -318,7 +344,7 @@ class SpiBridgeNode(Node):
         msg.header.frame_id = self.imu_frame_id
         msg.orientation_covariance[0] = -1.0  # orientation unknown
 
-        # Apply optional unit scaling (3). Leave scales at 1.0 to publish raw.
+        # Optional scaling; leave params at 1.0 to publish raw.
         msg.angular_velocity.x = float(self.received_data.data[2] * self.gyro_scale)
         msg.angular_velocity.y = float(self.received_data.data[3] * self.gyro_scale)
         msg.angular_velocity.z = float(self.received_data.data[4] * self.gyro_scale)
@@ -332,7 +358,6 @@ class SpiBridgeNode(Node):
         msg = MagneticField()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.imu_frame_id
-
         msg.magnetic_field.x = float(self.received_data.data[8] * self.mag_scale)
         msg.magnetic_field.y = float(self.received_data.data[9] * self.mag_scale)
         msg.magnetic_field.z = float(self.received_data.data[10] * self.mag_scale)
@@ -366,7 +391,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Ensure SPI device is released
+        try:
+            node.spi.close()
+        except Exception:
+            pass
         node.destroy_node()
-        # 5) graceful shutdown guard
         if rclpy.ok():
             rclpy.shutdown()
