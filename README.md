@@ -22,9 +22,36 @@ It keeps your original Python SPI loop structure (headers, CRC table, verify fun
 
 ## Install dependencies
 
+### Ubuntu on Raspberry Pi (Debian/Ubuntu-based, apt packages available)
+
 ```bash
 sudo apt update
-sudo apt install -y python3-pip python3-colcon-common-extensions   ros-jazzy-teleop-twist-keyboard python3-spidev
+sudo apt install -y python3-pip python3-colcon-common-extensions ros-jazzy-teleop-twist-keyboard python3-spidev
+```
+
+### Raspberry Pi OS (Bookworm) — build `teleop_twist_keyboard` from source
+
+The `ros-jazzy-teleop-twist-keyboard` apt package is usually **not available** on Raspberry Pi OS.
+Build it from source alongside this package:
+
+```bash
+# Create or reuse a workspace for Pi OS
+mkdir -p ~/spi_ws/src
+cd ~/spi_ws/src
+
+# Clone teleop_twist_keyboard (ROS 2 version)
+git clone https://github.com/ros2/teleop_twist_keyboard.git
+
+# Also clone this spi_bridge repo here if not already
+# git clone https://github.com/pichim/spi_bridge.git
+
+# Ensure spidev is installed
+sudo apt update && sudo apt install -y python3-spidev
+
+# Build the workspace
+cd ~/spi_ws
+colcon build --symlink-install
+source install/setup.bash
 ```
 
 ---
@@ -45,24 +72,48 @@ sudo reboot
 
 ---
 
-## Permissions (Raspberry Pi Ubuntu)
+## Permissions
+
+### Ubuntu
 
 Make sure your user can open `/dev/spidev0.0` without sudo:
 
 ```bash
 ls -l /dev/spidev*
-# devices should be group 'dialout'
 sudo usermod -aG dialout $USER
-newgrp dialout  # apply group membership to this shell
+newgrp dialout
+```
+
+### Raspberry Pi OS
+
+```bash
+ls -l /dev/spidev*
+sudo usermod -aG spi $USER
+newgrp spi
 ```
 
 ---
 
 ## Build
 
+### Ubuntu (workspace: `~/ros2_ws`)
+
 ```bash
-# from your workspace root
+source /opt/ros/jazzy/setup.bash
+
 cd ~/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+### Raspberry Pi OS (workspace: `~/spi_ws`)
+
+If you built ROS 2 from source, remember to source your base install **before** building/running this workspace.
+
+```bash
+source ~/ros2_jazzy/install/local_setup.bash
+
+cd ~/spi_ws
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -71,7 +122,7 @@ source install/setup.bash
 
 ## Run
 
-### Option A — run separately (recommended for keyboard input)
+### Ubuntu on Raspberry Pi (workspace: `~/ros2_ws`)
 
 ```bash
 # Terminal 1: SPI bridge
@@ -83,11 +134,15 @@ source ~/ros2_ws/install/setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
-### Option B — single launch (teleop with a pseudo-TTY)
-
+### Raspberry Pi OS (workspace: `~/spi_ws`)
 ```bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch spi_bridge teleop_spi.launch.py
+# Terminal 1: SPI bridge
+source ~/spi_ws/install/setup.bash
+ros2 run spi_bridge spi_bridge_node
+
+# Terminal 2: keyboard teleop (keep this terminal focused while driving)
+source ~/spi_ws/install/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
 ---
@@ -122,17 +177,22 @@ gyro_scale: 0.01745329252  # to publish rad/s
 
 ## Additional commands
 
-### Adding a launch argument to change `spi_max_speed_hz` at runtime:
+### Change `spi_max_speed_hz` at runtime and send a test command
 
 ```bash
+# Send a simple forward command at 50 Hz
 ros2 topic pub -r 50 /cmd_vel geometry_msgs/Twist "{linear: {x: 0.3}, angular: {z: 0.0}}"
 ```
 
-### Then, in another terminal, set `spi_max_speed_hz` to 12 MHz (default is 8 MHz):
+Then, in another terminal, attempt to set the SPI speed parameter:
 
 ```bash
 ros2 param set /spi_bridge spi_max_speed_hz 12000000
 ```
+
+> **Note:** The node currently does **not** re-apply changed parameters at runtime (no parameter callback).
+> The value will update on the parameter server, but the SPI device speed will only change after you **restart**
+> the node with a new YAML/launch configuration.
 
 ---
 
