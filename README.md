@@ -6,7 +6,20 @@ It keeps your original Python SPI loop structure (headers, CRC table, verify fun
 - Subscribes to `/cmd_vel` and sends the first two floats (forward, turn) to the Nucleo.
 - Publishes feedback (Nucleo’s measured forward/turn), IMU raw data, magnetometer, and a diagnostics array.
 
----
+## Wiring (Pi J8 → Nucleo-F446RE)
+
+| Raspberry Pi 5 Pin | Function              | Nucleo F446RE Pin |
+| ------------------ | --------------------- | ----------------- |
+| 5V (PIN 2)         | Optional Power Supply | E5V               |
+| GND (PIN 6)        | First GND             | GND below E5V     |
+|                    |                       |                   |
+| GPIO10 (Pin 19)    | MOSI                  | PC_3              |
+| GND    (Pin 20)    | Second GND            | GND below AVDD    |
+| GPIO9  (Pin 21)    | MISO                  | PC_2              |
+| GPIO11 (Pin 23)    | SCLK                  | PB_10             |
+| GPIO8  (Pin 24)    | CS (CE0)              | PB_12             |
+
+It is important to connect two GNDs (pins 6 and 20) to ensure a stable reference.
 
 ## Topics
 
@@ -17,8 +30,6 @@ It keeps your original Python SPI loop structure (headers, CRC table, verify fun
   - `/imu/data_raw` (`sensor_msgs/Imu`) — gyro (rad/s) & accel (m/s²)
   - `/imu/mag` (`sensor_msgs/MagneticField`) — magnetic field (Tesla)
   - `/spi/diag` (`diagnostic_msgs/DiagnosticArray`) — timing & counters
-
----
 
 ## Install dependencies
 
@@ -54,8 +65,6 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
----
-
 ## Enable SPI (if not already)
 
 Edit `/boot/firmware/config.txt` and ensure:
@@ -69,8 +78,6 @@ Reboot if you changed it:
 ```bash
 sudo reboot
 ```
-
----
 
 ## Permissions
 
@@ -91,8 +98,6 @@ ls -l /dev/spidev*
 sudo usermod -aG spi $USER
 newgrp spi
 ```
-
----
 
 ## Build
 
@@ -118,8 +123,6 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
----
-
 ## Run
 
 ### Ubuntu on Raspberry Pi (workspace: `~/ros2_ws`)
@@ -135,6 +138,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
 ### Raspberry Pi OS (workspace: `~/spi_ws`)
+
 ```bash
 # Terminal 1: SPI bridge
 source ~/spi_ws/install/setup.bash
@@ -145,8 +149,6 @@ source ~/spi_ws/install/setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
 ```
 
----
-
 ## Monitor data
 
 ```bash
@@ -156,24 +158,20 @@ ros2 topic echo /imu/mag
 ros2 topic echo /spi/diag
 ```
 
----
-
 ## Parameters (see config/params.yaml)
 
-- `spi_bus`, `spi_dev`, `spi_max_speed_hz` — selects `/dev/spidev<bus>.<dev>` and SPI clock.  
-- `main_task_period_us` — loop period in microseconds (default 10000 ⇒ 100 Hz).  
-- `arm_gap_us` — busy-wait gap between ARM and PUBLISH transfers (default 100 µs).  
-- `cmd_timeout_ms` — deadman timeout; if `/cmd_vel` is silent this long, send zeros.  
-- `max_forward`, `max_turn` — safety clamps for incoming `/cmd_vel`.  
-- `imu_frame_id`, `base_frame_id` — frame names for published messages.  
-- `gyro_scale`, `accel_scale`, `mag_scale` — optional scaling to convert Nucleo units to ROS units.  
+- `spi_bus`, `spi_dev`, `spi_max_speed_hz` — selects `/dev/spidev<bus>.<dev>` and SPI clock.
+- `main_task_period_us` — loop period in microseconds (default 10000 ⇒ 100 Hz).
+- `arm_gap_us` — busy-wait gap between ARM and PUBLISH transfers (default 100 µs).
+- `cmd_timeout_ms` — deadman timeout; if `/cmd_vel` is silent this long, send zeros.
+- `max_forward`, `max_turn` — safety clamps for incoming `/cmd_vel`.
+- `imu_frame_id`, `base_frame_id` — frame names for published messages.
+- `gyro_scale`, `accel_scale`, `mag_scale` — optional scaling to convert Nucleo units to ROS units.
 
-Example: if Nucleo sends degrees/s, set  
+Example: if Nucleo sends degrees/s, set
 ```yaml
 gyro_scale: 0.01745329252  # to publish rad/s
 ```
-
----
 
 ## Additional commands
 
@@ -194,23 +192,19 @@ ros2 param set /spi_bridge spi_max_speed_hz 12000000
 > The value will update on the parameter server, but the SPI device speed will only change after you **restart**
 > the node with a new YAML/launch configuration.
 
----
-
 ## Notes
 
-- Protocol matches the original script:  
-  - ARM-ONLY transfer (`0x56` + zeros) so the Nucleo re-arms its TX.  
-  - PUBLISH transfer (`0x55` + payload) sends commands and reads fresh data.  
-- On CRC/header mismatch, the node increments `fail_count` (see `/spi/diag`) and keeps timing.  
-- A simple deadman zeros commands if `/cmd_vel` is silent for `cmd_timeout_ms`.  
-- You can tweak period/gap/limits in `config/params.yaml` without touching code.  
-
----
+- Protocol matches the original script:
+  - ARM-ONLY transfer (`0x56` + zeros) so the Nucleo re-arms its TX.
+  - PUBLISH transfer (`0x55` + payload) sends commands and reads fresh data.
+- On CRC/header mismatch, the node increments `fail_count` (see `/spi/diag`) and keeps timing.
+- A simple deadman zeros commands if `/cmd_vel` is silent for `cmd_timeout_ms`.
+- You can tweak period/gap/limits in `config/params.yaml` without touching code.
 
 ## TODO
 
-- [ ] Add a runtime parameter to control per-cycle log verbosity (currently gated by `VERBOSE_CYCLE_LOG` in code).  
-- [ ] Verify and document sensor units (gyro = rad/s, accel = m/s², mag = Tesla) and set `gyro_scale`, `accel_scale`, `mag_scale` accordingly.  
-- [ ] Optional: publish a fused orientation on `/imu/data` with covariances per REP-145.  
-- [ ] Optional: add joystick teleop and a separate launch.  
-- [ ] Optional: diagnostics improvements (e.g., reasons for CRC failures, SPI timing histograms).  
+- [ ] Add a runtime parameter to control per-cycle log verbosity (currently gated by `VERBOSE_CYCLE_LOG` in code).
+- [ ] Verify and document sensor units (gyro = rad/s, accel = m/s², mag = Tesla) and set `gyro_scale`, `accel_scale`, `mag_scale` accordingly.
+- [ ] Optional: publish a fused orientation on `/imu/data` with covariances per REP-145.
+- [ ] Optional: add joystick teleop and a separate launch.
+- [ ] Optional: diagnostics improvements (e.g., reasons for CRC failures, SPI timing histograms).
